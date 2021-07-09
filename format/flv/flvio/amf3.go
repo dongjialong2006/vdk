@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/deepch/vdk/utils/bits/pio"
+	"github.com/dongjialong2006/vdk/utils/bits/pio"
 )
 
 const (

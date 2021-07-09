@@ -17,13 +17,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepch/vdk/av"
-	"github.com/deepch/vdk/av/avutil"
-	"github.com/deepch/vdk/codec"
-	"github.com/deepch/vdk/codec/aacparser"
-	"github.com/deepch/vdk/codec/h264parser"
-	"github.com/deepch/vdk/format/rtsp/sdp"
-	"github.com/deepch/vdk/utils/bits/pio"
+	"github.com/dongjialong2006/vdk/av"
+	"github.com/dongjialong2006/vdk/av/avutil"
+	"github.com/dongjialong2006/vdk/codec"
+	"github.com/dongjialong2006/vdk/codec/aacparser"
+	"github.com/dongjialong2006/vdk/codec/h264parser"
+	"github.com/dongjialong2006/vdk/format/rtsp/sdp"
+	"github.com/dongjialong2006/vdk/utils/bits/pio"
 )
 
 var ErrCodecDataChange = fmt.Errorf("rtsp: codec data change, please call HandleCodecDataChange()")

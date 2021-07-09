@@ -10,8 +10,8 @@ import (
 
 	"github.com/pion/webrtc/v2"
 
-	"github.com/deepch/vdk/av"
-	"github.com/deepch/vdk/codec/h264parser"
+	"github.com/dongjialong2006/vdk/av"
+	"github.com/dongjialong2006/vdk/codec/h264parser"
 	"github.com/pion/webrtc/v2/pkg/media"
 )
 
