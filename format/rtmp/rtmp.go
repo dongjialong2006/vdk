@@ -384,20 +384,19 @@ func (self *Conn) readConnect() (err error) {
 		return
 	}
 
-	var ok bool
-	var _app, _tcurl interface{}
-	if _app, ok = self.commandobj["app"]; !ok {
+	tmp := self.commandobj.Get("app")
+	if nil == tmp || nil == tmp.V {
 		err = fmt.Errorf("rtmp: `connect` params missing `app`")
 		return
 	}
-	connectpath, _ = _app.(string)
+	connectpath, _ = tmp.V.(string)
 
 	var tcurl string
-	if _tcurl, ok = self.commandobj["tcUrl"]; !ok {
-		_tcurl, ok = self.commandobj["tcurl"]
+	if tmp = self.commandobj.Get("tcUrl"); nil == tmp {
+		tmp = self.commandobj.Get("tcurl")
 	}
-	if ok {
-		tcurl, _ = _tcurl.(string)
+	if nil != tmp && nil != tmp.V {
+		tcurl, _ = tmp.V.(string)
 	}
 	connectparams := self.commandobj
 
@@ -405,19 +404,17 @@ func (self *Conn) readConnect() (err error) {
 		return
 	}
 
-	// > _result("NetConnection.Connect.Success")
-	if err = self.writeCommandMsg(3, 0, "_result", self.commandtransid,
-		flvio.AMFMap{
-			"fmtVer":       "FMS/3,0,1,123",
-			"capabilities": 31,
-		},
-		flvio.AMFMap{
-			"level":          "status",
-			"code":           "NetConnection.Connect.Success",
-			"description":    "Connection succeeded.",
-			"objectEncoding": 3,
-		},
-	); err != nil {
+	var amf1 flvio.AMFMap
+	amf1 = amf1.Set("fmtVer", "FMS/3,0,1,123")
+	amf1 = amf1.Set("capabilities", 31)
+
+	var amf2 flvio.AMFMap
+	amf2 = amf2.Set("level", "status")
+	amf2 = amf2.Set("code", "NetConnection.Connect.Success")
+	amf2 = amf2.Set("description", "Connection succeeded.")
+	amf2 = amf2.Set("objectEncoding", 3)
+
+	if err = self.writeCommandMsg(3, 0, "_result", self.commandtransid, amf1, amf2); err != nil {
 		return
 	}
 
@@ -460,15 +457,11 @@ func (self *Conn) readConnect() (err error) {
 					cberr = self.OnPlayOrPublish(self.commandname, connectparams)
 				}
 
-				// > onStatus()
-				if err = self.writeCommandMsg(5, self.avmsgsid,
-					"onStatus", self.commandtransid, nil,
-					flvio.AMFMap{
-						"level":       "status",
-						"code":        "NetStream.Publish.Start",
-						"description": "Start publishing",
-					},
-				); err != nil {
+				var amf flvio.AMFMap
+				amf = amf.Set("level", "status")
+				amf = amf.Set("code", "NetStream.Publish.Start")
+				amf = amf.Set("description", "Start publishing")
+				if err = self.writeCommandMsg(5, self.avmsgsid, "onStatus", self.commandtransid, nil, amf); err != nil {
 					return
 				}
 				if err = self.flushWrite(); err != nil {
@@ -503,15 +496,12 @@ func (self *Conn) readConnect() (err error) {
 					return
 				}
 
-				// > onStatus()
+				var amf flvio.AMFMap
+				amf = amf.Set("level", "status")
+				amf = amf.Set("code", "NetStream.Play.Start")
+				amf = amf.Set("description", "Start live")
 				if err = self.writeCommandMsg(5, self.avmsgsid,
-					"onStatus", self.commandtransid, nil,
-					flvio.AMFMap{
-						"level":       "status",
-						"code":        "NetStream.Play.Start",
-						"description": "Start live",
-					},
-				); err != nil {
+					"onStatus", self.commandtransid, nil, amf); err != nil {
 					return
 				}
 
@@ -551,13 +541,13 @@ func (self *Conn) checkConnectResult() (ok bool, errmsg string) {
 		return
 	}
 
-	_code, _ := obj["code"]
-	if _code == nil {
+	_code := obj.Get("code")
+	if _code == nil || nil == _code.V {
 		errmsg = "code invalid"
 		return
 	}
 
-	code, _ := _code.(string)
+	code, _ := _code.V.(string)
 	if code != "NetConnection.Connect.Success" {
 		errmsg = "code != NetConnection.Connect.Success"
 		return
@@ -603,18 +593,18 @@ func (self *Conn) writeConnect(path string) (err error) {
 	if Debug {
 		fmt.Printf("rtmp: > connect('%s') host=%s\n", path, self.URL.Host)
 	}
-	if err = self.writeCommandMsg(3, 0, "connect", 1,
-		flvio.AMFMap{
-			"app":           path,
-			"flashVer":      "MAC 22,0,0,192",
-			"tcUrl":         getTcUrl(self.URL),
-			"fpad":          false,
-			"capabilities":  15,
-			"audioCodecs":   4071,
-			"videoCodecs":   252,
-			"videoFunction": 1,
-		},
-	); err != nil {
+
+	var amf flvio.AMFMap
+	amf = amf.Set("app", path)
+	amf = amf.Set("flashVer", "1.3.0")
+	amf = amf.Set("tcUrl", getTcUrl(self.URL))
+	amf = amf.Set("fpad", false)
+	amf = amf.Set("capabilities", 15)
+	amf = amf.Set("audioCodecs", 4071)
+	amf = amf.Set("videoCodecs", 252)
+	amf = amf.Set("videoFunction", 1)
+
+	if err = self.writeCommandMsg(3, 0, "connect", 1, amf); err != nil {
 		return
 	}
 
@@ -879,39 +869,40 @@ func (self *Conn) WriteTrailer() (err error) {
 	return
 }
 
-func (self *Conn) WriteHeader(streams []av.CodecData) (err error) {
-	if err = self.prepare(stageCommandDone, prepareWriting); err != nil {
-		return
+func (self *Conn) WriteHeader(streams []av.CodecData) error {
+	if err := self.prepare(stageCommandDone, prepareWriting); err != nil {
+		return err
 	}
 
-	var metadata flvio.AMFMap
-	if metadata, err = flv.NewMetadataByStreams(streams); err != nil {
-		return
+	metadata, err := flv.NewMetadataByStreams(streams)
+	if err != nil {
+		return err
 	}
 
 	// > onMetaData()
 	if err = self.writeDataMsg(5, self.avmsgsid, "onMetaData", metadata); err != nil {
-		return
+		return err
 	}
 
 	// > Videodata(decoder config)
 	// > Audiodata(decoder config)
 	for _, stream := range streams {
-		var ok bool
-		var tag flvio.Tag
-		if tag, ok, err = flv.CodecDataToTag(stream); err != nil {
-			return
+		tag, ok, err := flv.CodecDataToTag(stream)
+		if nil != err {
+			return err
 		}
+
 		if ok {
-			if err = self.writeAVTag(tag, 0); err != nil {
-				return
+			if err = self.writeAVTag(*tag, 0); err != nil {
+				return err
 			}
 		}
 	}
 
 	self.streams = streams
 	self.stage++
-	return
+
+	return err
 }
 
 func (self *Conn) tmpwbuf(n int) []byte {
@@ -971,16 +962,17 @@ func (self *Conn) writeDataMsg(csid, msgsid uint32, args ...interface{}) (err er
 func (self *Conn) writeAMF0Msg(msgtypeid uint8, csid, msgsid uint32, args ...interface{}) (err error) {
 	size := 0
 	for _, arg := range args {
-		size += flvio.LenAMF0Val(arg)
+		flvio.FillAMF0Val(nil, &size, arg)
 	}
 
 	b := self.tmpwbuf(chunkHeaderLength + size)
 	n := self.fillChunkHeader(b, csid, 0, msgtypeid, msgsid, size)
-	for _, arg := range args {
-		n += flvio.FillAMF0Val(b[n:], arg)
-	}
+	// for _, arg := range args {
+	n += flvio.FillAMF0Vals(b[n:], args)
+	// }
 
 	_, err = self.bufw.Write(b[:n])
+
 	return
 }
 
@@ -1319,20 +1311,20 @@ func (self *Conn) readChunk() (err error) {
 
 func (self *Conn) handleCommandMsgAMF0(b []byte) (n int, err error) {
 	var name, transid, obj interface{}
-	var size int
+	// var size int
 
-	if name, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+	if name, err = flvio.ParseAMF0Val(b[n:], &n); err != nil {
 		return
 	}
-	n += size
-	if transid, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+	// n += size
+	if transid, err = flvio.ParseAMF0Val(b[n:], &n); err != nil {
 		return
 	}
-	n += size
-	if obj, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+	// n += size
+	if obj, err = flvio.ParseAMF0Val(b[n:], &n); err != nil {
 		return
 	}
-	n += size
+	// n += size
 
 	var ok bool
 	if self.commandname, ok = name.(string); !ok {
@@ -1344,10 +1336,10 @@ func (self *Conn) handleCommandMsgAMF0(b []byte) (n int, err error) {
 	self.commandparams = []interface{}{}
 
 	for n < len(b) {
-		if obj, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+		if obj, err = flvio.ParseAMF0Val(b[n:], &n); err != nil {
 			return
 		}
-		n += size
+		// n += size
 		self.commandparams = append(self.commandparams, obj)
 	}
 	if n < len(b) {
@@ -1356,6 +1348,49 @@ func (self *Conn) handleCommandMsgAMF0(b []byte) (n int, err error) {
 	}
 
 	self.gotcommand = true
+	return
+}
+
+func (self *Conn) handleCommandMsgAMF3(b []byte) (n int, err error) {
+	var name, transid, obj interface{}
+	// var size int
+
+	if name, err = flvio.ParseAMF3Val(b[n:], &n); err != nil {
+		return
+	}
+	// n += size
+	if transid, err = flvio.ParseAMF3Val(b[n:], &n); err != nil {
+		return
+	}
+	// n += size
+	if obj, err = flvio.ParseAMF3Val(b[n:], &n); err != nil {
+		return
+	}
+	// n += size
+
+	var ok bool
+	if self.commandname, ok = name.(string); !ok {
+		err = fmt.Errorf("rtmp: CommandMsgAMF0 command is not string")
+		return
+	}
+	self.commandtransid, _ = transid.(float64)
+	self.commandobj, _ = obj.(flvio.AMFMap)
+	self.commandparams = []interface{}{}
+
+	for n < len(b) {
+		if obj, err = flvio.ParseAMF3Val(b[n:], &n); err != nil {
+			return
+		}
+		// n += size
+		self.commandparams = append(self.commandparams, obj)
+	}
+	if n < len(b) {
+		err = fmt.Errorf("rtmp: CommandMsgAMF0 left bytes=%d", len(b)-n)
+		return
+	}
+
+	self.gotcommand = true
+
 	return
 }
 
@@ -1369,41 +1404,49 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 		if _, err = self.handleCommandMsgAMF0(msgdata); err != nil {
 			return
 		}
-
 	case msgtypeidCommandMsgAMF3:
 		if len(msgdata) < 1 {
 			err = fmt.Errorf("rtmp: short packet of CommandMsgAMF3")
 			return
 		}
 		// skip first byte
-		if _, err = self.handleCommandMsgAMF0(msgdata[1:]); err != nil {
+		if _, err = self.handleCommandMsgAMF3(msgdata[1:]); err != nil {
 			return
 		}
-
 	case msgtypeidUserControl:
 		if len(msgdata) < 2 {
 			err = fmt.Errorf("rtmp: short packet of UserControl")
 			return
 		}
 		self.eventtype = pio.U16BE(msgdata)
-
 	case msgtypeidDataMsgAMF0:
 		b := msgdata
 		n := 0
 		for n < len(b) {
 			var obj interface{}
-			var size int
-			if obj, size, err = flvio.ParseAMF0Val(b[n:]); err != nil {
+			if obj, err = flvio.ParseAMF0Val(b[n:], &n); err != nil {
 				return
 			}
-			n += size
 			self.datamsgvals = append(self.datamsgvals, obj)
 		}
 		if n < len(b) {
 			err = fmt.Errorf("rtmp: DataMsgAMF0 left bytes=%d", len(b)-n)
 			return
 		}
-
+	case msgtypeidDataMsgAMF3:
+		b := msgdata
+		n := 0
+		for n < len(b) {
+			var obj interface{}
+			if obj, err = flvio.ParseAMF3Val(b[n:], &n); err != nil {
+				return
+			}
+			self.datamsgvals = append(self.datamsgvals, obj)
+		}
+		if n < len(b) {
+			err = fmt.Errorf("rtmp: DataMsgAMF3 left bytes=%d", len(b)-n)
+			return
+		}
 	case msgtypeidVideoMsg:
 		if len(msgdata) == 0 {
 			return
@@ -1418,7 +1461,6 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 		}
 		tag.Data = msgdata[n:]
 		self.avtag = tag
-
 	case msgtypeidAudioMsg:
 		if len(msgdata) == 0 {
 			return
@@ -1430,7 +1472,6 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 		}
 		tag.Data = msgdata[n:]
 		self.avtag = tag
-
 	case msgtypeidSetChunkSize:
 		if len(msgdata) < 4 {
 			err = fmt.Errorf("rtmp: short packet of SetChunkSize")
@@ -1441,6 +1482,7 @@ func (self *Conn) handleMsg(timestamp uint32, msgsid uint32, msgtypeid uint8, ms
 	}
 
 	self.gotmsg = true
+
 	return
 }
 

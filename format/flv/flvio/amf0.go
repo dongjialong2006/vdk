@@ -1,78 +1,168 @@
 package flvio
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/deepch/vdk/utils/bits/pio"
 )
 
-type AMF0ParseError struct {
+type AMFParseError struct {
 	Offset  int
 	Message string
-	Next    *AMF0ParseError
+	Next    *AMFParseError
+	Bytes   []byte
 }
 
-func (self *AMF0ParseError) Error() string {
-	s := []string{}
-	for p := self; p != nil; p = p.Next {
-		s = append(s, fmt.Sprintf("%s:%d", p.Message, p.Offset))
+func (e *AMFParseError) Error() string {
+	if e.Bytes != nil {
+		s := []string{}
+		for p := e; p != nil; p = p.Next {
+			s = append(s, fmt.Sprintf("%s", p.Message))
+		}
+		return fmt.Sprintf("AMFParseError(%d)", e.Offset) + strings.Join(s, ",") + fmt.Sprintf("Bytes(%x)", e.Bytes)
 	}
-	return "amf0 parse error: " + strings.Join(s, ",")
+	return fmt.Sprintf("AMFParseError(%d)", e.Offset)
 }
 
-func amf0ParseErr(message string, offset int, err error) error {
-	next, _ := err.(*AMF0ParseError)
-	return &AMF0ParseError{
+func amfParseErr(message string, b []byte, offset int, err error) error {
+	next, _ := err.(*AMFParseError)
+	return &AMFParseError{
 		Offset:  offset,
 		Message: message,
 		Next:    next,
 	}
 }
 
-type AMFMap map[string]interface{}
+type AMFKv struct {
+	K string
+	V interface{}
+}
+type AMFMap []AMFKv
+
+func (a AMFMap) Get(k string) *AMFKv {
+	for i := range a {
+		kv := &a[i]
+		if kv.K == k {
+			return kv
+		}
+	}
+	return nil
+}
+
+func (a AMFMap) GetString(k string) (string, bool) {
+	v, ok := a.GetV(k)
+	if !ok {
+		return "", false
+	}
+	s, typeok := v.(string)
+	return s, typeok
+}
+
+func (a AMFMap) GetBool(k string) (bool, bool) {
+	v, ok := a.GetV(k)
+	if !ok {
+		return false, false
+	}
+	b, typeok := v.(bool)
+	return b, typeok
+}
+
+func (a AMFMap) GetFloat64(k string) (float64, bool) {
+	v, ok := a.GetV(k)
+	if !ok {
+		return 0, false
+	}
+	f, typeok := v.(float64)
+	return f, typeok
+}
+
+func (a AMFMap) GetV(k string) (interface{}, bool) {
+	kv := a.Get(k)
+	if kv == nil {
+		return nil, false
+	}
+	return kv.V, true
+}
+
+func (a AMFMap) Del(dk string) AMFMap {
+	nm := AMFMap{}
+	for _, kv := range a {
+		if kv.K != dk {
+			nm = append(nm, kv)
+		}
+	}
+	return nm
+}
+
+func (a AMFMap) Set(k string, v interface{}) AMFMap {
+	kv := a.Get(k)
+	if kv == nil {
+		return append(a, AMFKv{k, v})
+	}
+	kv.V = v
+	return a
+}
+
+func (a AMFMap) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+
+	buf.WriteString("{")
+	for i, kv := range a {
+		if i != 0 {
+			buf.WriteString(",")
+		}
+		key, err := json.Marshal(kv.K)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(key)
+		buf.WriteString(":")
+		val, err := json.Marshal(kv.V)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(val)
+	}
+
+	buf.WriteString("}")
+	return buf.Bytes(), nil
+}
+
 type AMFArray []interface{}
-type AMFECMAArray map[string]interface{}
+type AMFECMAArray AMFMap
 
-func parseBEFloat64(b []byte) float64 {
-	return math.Float64frombits(pio.U64BE(b))
+func readBEFloat64(b []byte, n *int) (f float64, err error) {
+	var v uint64
+	if v, err = pio.ReadU64BE(b, n); err != nil {
+		return
+	}
+	f = math.Float64frombits(v)
+	return
 }
 
-func fillBEFloat64(b []byte, f float64) int {
-	pio.PutU64BE(b, math.Float64bits(f))
-	return 8
+func readTime64(b []byte, n *int) (t time.Time, err error) {
+	var ts float64
+	if ts, err = readBEFloat64(b, n); err != nil {
+		return
+	}
+	t = time.Unix(int64(ts/1000), (int64(ts)%1000)*1000000)
+	return
 }
 
-const lenAMF0Number = 9
-
-func fillAMF0Number(b []byte, f float64) int {
-	b[0] = numbermarker
-	fillBEFloat64(b[1:], f)
-	return lenAMF0Number
+func fillBEFloat64(b []byte, n *int, f float64) {
+	pio.WriteU64BE(b, n, math.Float64bits(f))
 }
 
-const (
-	amf3undefinedmarker = iota
-	amf3nullmarker
-	amf3falsemarker
-	amf3truemarker
-	amf3integermarker
-	amf3doublemarker
-	amf3stringmarker
-	amf3xmldocmarker
-	amf3datemarker
-	amf3arraymarker
-	amf3objectmarker
-	amf3xmlmarker
-	amf3bytearraymarker
-	amf3vectorintmarker
-	amf3vectoruintmarker
-	amf3vectordoublemarker
-	amf3vectorobjectmarker
-	amf3dictionarymarker
-)
+func fillAMF0Number(b []byte, n *int, f float64) {
+	pio.WriteU8(b, n, numbermarker)
+	fillBEFloat64(b, n, f)
+}
 
 const (
 	numbermarker = iota
@@ -95,372 +185,340 @@ const (
 	avmplusobjectmarker
 )
 
-func LenAMF0Val(_val interface{}) (n int) {
-	switch val := _val.(type) {
-	case int8:
-		n += lenAMF0Number
-	case int16:
-		n += lenAMF0Number
-	case int32:
-		n += lenAMF0Number
-	case int64:
-		n += lenAMF0Number
-	case int:
-		n += lenAMF0Number
-	case uint8:
-		n += lenAMF0Number
-	case uint16:
-		n += lenAMF0Number
-	case uint32:
-		n += lenAMF0Number
-	case uint64:
-		n += lenAMF0Number
-	case uint:
-		n += lenAMF0Number
-	case float32:
-		n += lenAMF0Number
-	case float64:
-		n += lenAMF0Number
-
-	case string:
-		u := len(val)
-		if u <= 65536 {
-			n += 3
-		} else {
-			n += 5
-		}
-		n += int(u)
-
-	case AMFECMAArray:
-		n += 5
-		for k, v := range val {
-			n += 2 + len(k)
-			n += LenAMF0Val(v)
-		}
-		n += 3
-
-	case AMFMap:
-		n++
-		for k, v := range val {
-			if len(k) > 0 {
-				n += 2 + len(k)
-				n += LenAMF0Val(v)
-			}
-		}
-		n += 3
-
-	case AMFArray:
-		n += 5
-		for _, v := range val {
-			n += LenAMF0Val(v)
-		}
-
-	case time.Time:
-		n += 1 + 8 + 2
-
-	case bool:
-		n += 2
-
-	case nil:
-		n++
-	}
-
+func FillAMF0ValMalloc(v interface{}) (b []byte) {
+	vals := []interface{}{v}
+	n := FillAMF0Vals(nil, vals)
+	b = make([]byte, n)
+	FillAMF0Vals(b, vals)
 	return
 }
 
-func FillAMF0Val(b []byte, _val interface{}) (n int) {
+func FillAMF0ValsMalloc(vals []interface{}) (b []byte) {
+	n := FillAMF0Vals(nil, vals)
+	b = make([]byte, n)
+	FillAMF0Vals(b, vals)
+	return
+}
+
+func FillAMF0Vals(b []byte, vals []interface{}) (n int) {
+	for _, v := range vals {
+		if _b, ok := v.([]byte); ok {
+			pio.WriteBytes(b, &n, _b)
+		} else {
+			FillAMF0Val(b, &n, v)
+		}
+	}
+	return
+}
+
+type orderpair struct {
+	k string
+	v interface{}
+}
+
+type orderpairs []orderpair
+
+func (o orderpairs) Len() int {
+	return len(o)
+}
+
+func (o orderpairs) Swap(i, j int) {
+	o[i], o[j] = o[j], o[i]
+}
+
+func (o orderpairs) Less(i, j int) bool {
+	return o[i].k < o[j].k
+}
+
+func ordermap(m map[string]interface{}) (p orderpairs) {
+	for k, v := range m {
+		p = append(p, orderpair{k, v})
+	}
+	sort.Sort(p)
+	return
+}
+
+func FillAMF0Val(b []byte, n *int, _val interface{}) {
 	switch val := _val.(type) {
 	case int8:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case int16:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case int32:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case int64:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case int:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case uint8:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case uint16:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case uint32:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case uint64:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case uint:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case float32:
-		n += fillAMF0Number(b[n:], float64(val))
+		fillAMF0Number(b, n, float64(val))
 	case float64:
-		n += fillAMF0Number(b[n:], float64(val))
-
+		fillAMF0Number(b, n, float64(val))
 	case string:
 		u := len(val)
-		if u <= 65536 {
-			b[n] = stringmarker
-			n++
-			pio.PutU16BE(b[n:], uint16(u))
-			n += 2
+		if u < 65536 {
+			pio.WriteU8(b, n, stringmarker)
+			pio.WriteU16BE(b, n, uint16(u))
 		} else {
-			b[n] = longstringmarker
-			n++
-			pio.PutU32BE(b[n:], uint32(u))
-			n += 4
+			pio.WriteU8(b, n, longstringmarker)
+			pio.WriteU32BE(b, n, uint32(u))
 		}
-		copy(b[n:], []byte(val))
-		n += len(val)
-
+		pio.WriteString(b, n, val)
 	case AMFECMAArray:
-		b[n] = ecmaarraymarker
-		n++
-		pio.PutU32BE(b[n:], uint32(len(val)))
-		n += 4
-		for k, v := range val {
-			pio.PutU16BE(b[n:], uint16(len(k)))
-			n += 2
-			copy(b[n:], []byte(k))
-			n += len(k)
-			n += FillAMF0Val(b[n:], v)
+		pio.WriteU8(b, n, ecmaarraymarker)
+		pio.WriteU32BE(b, n, uint32(len(val)))
+		for _, p := range val {
+			pio.WriteString(b, n, p.K)
+			FillAMF0Val(b, n, p.V)
 		}
-		pio.PutU24BE(b[n:], 0x000009)
-		n += 3
+		pio.WriteU24BE(b, n, 0x000009)
 
 	case AMFMap:
-		b[n] = objectmarker
-		n++
-		for k, v := range val {
-			if len(k) > 0 {
-				pio.PutU16BE(b[n:], uint16(len(k)))
-				n += 2
-				copy(b[n:], []byte(k))
-				n += len(k)
-				n += FillAMF0Val(b[n:], v)
+		pio.WriteU8(b, n, objectmarker)
+		for _, p := range val {
+			if len(p.K) > 0 {
+				pio.WriteU16BE(b, n, uint16(len(p.K)))
+				pio.WriteString(b, n, p.K)
+				FillAMF0Val(b, n, p.V)
 			}
 		}
-		pio.PutU24BE(b[n:], 0x000009)
-		n += 3
-
+		pio.WriteU24BE(b, n, 0x000009)
 	case AMFArray:
-		b[n] = strictarraymarker
-		n++
-		pio.PutU32BE(b[n:], uint32(len(val)))
-		n += 4
+		pio.WriteU8(b, n, strictarraymarker)
+		pio.WriteU32BE(b, n, uint32(len(val)))
 		for _, v := range val {
-			n += FillAMF0Val(b[n:], v)
+			FillAMF0Val(b, n, v)
 		}
-
 	case time.Time:
-		b[n] = datemarker
-		n++
+		pio.WriteU8(b, n, datemarker)
 		u := val.UnixNano()
 		f := float64(u / 1000000)
-		n += fillBEFloat64(b[n:], f)
-		pio.PutU16BE(b[n:], uint16(0))
-		n += 2
-
+		fillBEFloat64(b, n, f)
+		pio.WriteU16BE(b, n, uint16(0))
 	case bool:
-		b[n] = booleanmarker
-		n++
+		pio.WriteU8(b, n, booleanmarker)
 		var u uint8
 		if val {
 			u = 1
 		} else {
 			u = 0
 		}
-		b[n] = u
-		n++
-
+		pio.WriteU8(b, n, u)
 	case nil:
-		b[n] = nullmarker
-		n++
+		pio.WriteU8(b, n, nullmarker)
 	}
 
 	return
 }
 
-func ParseAMF0Val(b []byte) (val interface{}, n int, err error) {
-	return parseAMF0Val(b, 0)
+func ParseAMF0Val(b []byte, n *int) (val interface{}, err error) {
+	val, err = parseAMF0Val(0, b, n)
+	return
 }
 
-func parseAMF0Val(b []byte, offset int) (val interface{}, n int, err error) {
-	if len(b) < n+1 {
-		err = amf0ParseErr("marker", offset+n, err)
+func ParseAMFVals(b []byte, isamf3 bool) (arr []interface{}, err error) {
+	var n int
+	parse := ParseAMF0Val
+
+	if isamf3 {
+		if len(b) < 1 {
+			err = amfParseErr("amf3.marker", b, n, nil)
+			return
+		}
+		if b[0] == 0 {
+			n++
+		} else {
+			parse = ParseAMF3Val
+		}
+	}
+
+	for n < len(b) {
+		var v interface{}
+		if v, err = parse(b, &n); err != nil {
+			return
+		}
+		arr = append(arr, v)
+	}
+
+	return
+}
+
+func parseAMF0Val(depth int, b []byte, n *int) (val interface{}, err error) {
+	const debug = false
+
+	var marker uint8
+	if marker, err = pio.ReadU8(b, n); err != nil {
+		err = amfParseErr("marker", b, *n, err)
 		return
 	}
-	marker := b[n]
-	n++
+	if debug {
+		fmt.Println(depth, *n, "marker", marker)
+	}
 
 	switch marker {
 	case numbermarker:
-		if len(b) < n+8 {
-			err = amf0ParseErr("number", offset+n, err)
+		if val, err = readBEFloat64(b, n); err != nil {
+			err = amfParseErr("number", b, *n, err)
 			return
 		}
-		val = parseBEFloat64(b[n:])
-		n += 8
 
 	case booleanmarker:
-		if len(b) < n+1 {
-			err = amf0ParseErr("boolean", offset+n, err)
+		var v uint8
+		if v, err = pio.ReadU8(b, n); err != nil {
+			err = amfParseErr("boolean", b, *n, err)
 			return
 		}
-		val = b[n] != 0
-		n++
+		val = (v != 0)
 
 	case stringmarker:
-		if len(b) < n+2 {
-			err = amf0ParseErr("string.length", offset+n, err)
+		var length uint16
+		if length, err = pio.ReadU16BE(b, n); err != nil {
+			err = amfParseErr("string.length", b, *n, err)
 			return
 		}
-		length := int(pio.U16BE(b[n:]))
-		n += 2
-
-		if len(b) < n+length {
-			err = amf0ParseErr("string.body", offset+n, err)
+		if val, err = pio.ReadString(b, n, int(length)); err != nil {
+			err = amfParseErr("string.body", b, *n, err)
 			return
 		}
-		val = string(b[n : n+length])
-		n += length
 
 	case objectmarker:
 		obj := AMFMap{}
 		for {
-			if len(b) < n+2 {
-				err = amf0ParseErr("object.key.length", offset+n, err)
+			var length uint16
+			if length, err = pio.ReadU16BE(b, n); err != nil {
+				err = amfParseErr("object.key.length", b, *n, err)
 				return
 			}
-			length := int(pio.U16BE(b[n:]))
-			n += 2
 			if length == 0 {
 				break
 			}
 
-			if len(b) < n+length {
-				err = amf0ParseErr("object.key.body", offset+n, err)
+			var okey string
+			if okey, err = pio.ReadString(b, n, int(length)); err != nil {
+				err = amfParseErr("object.key.body", b, *n, err)
 				return
 			}
-			okey := string(b[n : n+length])
-			n += length
 
-			var nval int
+			if debug {
+				fmt.Println(depth, *n, "object.key", okey)
+			}
+
 			var oval interface{}
-			if oval, nval, err = parseAMF0Val(b[n:], offset+n); err != nil {
-				err = amf0ParseErr("object.val", offset+n, err)
+			if oval, err = parseAMF0Val(depth+1, b, n); err != nil {
+				err = amfParseErr("object.val", b, *n, err)
 				return
 			}
-			n += nval
 
-			obj[okey] = oval
+			obj = obj.Set(okey, oval)
 		}
-		if len(b) < n+1 {
-			err = amf0ParseErr("object.end", offset+n, err)
+		if _, err = pio.ReadU8(b, n); err != nil {
+			err = amfParseErr("object.end", b, *n, err)
 			return
 		}
-		n++
 		val = obj
 
 	case nullmarker:
 	case undefinedmarker:
 
 	case ecmaarraymarker:
-		if len(b) < n+4 {
-			err = amf0ParseErr("array.count", offset+n, err)
+		if _, err = pio.ReadU32BE(b, n); err != nil {
+			err = amfParseErr("array.count", b, *n, err)
 			return
 		}
-		n += 4
 
 		obj := AMFMap{}
 		for {
-			if len(b) < n+2 {
-				err = amf0ParseErr("array.key.length", offset+n, err)
+			var length uint16
+			if length, err = pio.ReadU16BE(b, n); err != nil {
+				err = amfParseErr("array.key.length", b, *n, err)
 				return
 			}
-			length := int(pio.U16BE(b[n:]))
-			n += 2
-
 			if length == 0 {
 				break
 			}
 
-			if len(b) < n+length {
-				err = amf0ParseErr("array.key.body", offset+n, err)
+			var okey string
+			if okey, err = pio.ReadString(b, n, int(length)); err != nil {
+				err = amfParseErr("array.key.body", b, *n, err)
 				return
 			}
-			okey := string(b[n : n+length])
-			n += length
 
-			var nval int
 			var oval interface{}
-			if oval, nval, err = parseAMF0Val(b[n:], offset+n); err != nil {
-				err = amf0ParseErr("array.val", offset+n, err)
+			if oval, err = parseAMF0Val(depth+1, b, n); err != nil {
+				err = amfParseErr("array.val", b, *n, err)
 				return
 			}
-			n += nval
 
-			obj[okey] = oval
+			obj = obj.Set(okey, oval)
 		}
-		if len(b) < n+1 {
-			err = amf0ParseErr("array.end", offset+n, err)
+		if _, err = pio.ReadU8(b, n); err != nil {
+			err = amfParseErr("array.end", b, *n, err)
 			return
 		}
-		n += 1
 		val = obj
 
 	case objectendmarker:
-		if len(b) < n+3 {
-			err = amf0ParseErr("objectend", offset+n, err)
+		if _, err = pio.ReadU24BE(b, n); err != nil {
+			err = amfParseErr("objectend", b, *n, err)
 			return
 		}
-		n += 3
 
 	case strictarraymarker:
-		if len(b) < n+4 {
-			err = amf0ParseErr("strictarray.count", offset+n, err)
+		var count uint32
+		if count, err = pio.ReadU32BE(b, n); err != nil {
+			err = amfParseErr("strictarray.count", b, *n, err)
 			return
 		}
-		count := int(pio.U32BE(b[n:]))
-		n += 4
-
+		if count > uint32(len(b)) {
+			err = amfParseErr("strictarray.count.toobig", b, *n, err)
+			return
+		}
 		obj := make(AMFArray, count)
 		for i := 0; i < int(count); i++ {
-			var nval int
-			if obj[i], nval, err = parseAMF0Val(b[n:], offset+n); err != nil {
-				err = amf0ParseErr("strictarray.val", offset+n, err)
+			if obj[i], err = parseAMF0Val(depth+1, b, n); err != nil {
+				err = amfParseErr("strictarray.val", b, *n, err)
 				return
 			}
-			n += nval
 		}
 		val = obj
 
 	case datemarker:
-		if len(b) < n+8+2 {
-			err = amf0ParseErr("date", offset+n, err)
+		var t time.Time
+		if t, err = readTime64(b, n); err != nil {
+			err = amfParseErr("date", b, *n, err)
 			return
 		}
-		ts := parseBEFloat64(b[n:])
-		n += 8 + 2
-
-		val = time.Unix(int64(ts/1000), (int64(ts)%1000)*1000000)
+		if _, err = pio.ReadU16BE(b, n); err != nil {
+			err = amfParseErr("date.end", b, *n, err)
+			return
+		}
+		val = t
 
 	case longstringmarker:
-		if len(b) < n+4 {
-			err = amf0ParseErr("longstring.length", offset+n, err)
+		var length uint32
+		if length, err = pio.ReadU32BE(b, n); err != nil {
+			err = amfParseErr("longstring.length", b, *n, err)
 			return
 		}
-		length := int(pio.U32BE(b[n:]))
-		n += 4
-
-		if len(b) < n+length {
-			err = amf0ParseErr("longstring.body", offset+n, err)
+		if length > uint32(len(b)) {
+			err = amfParseErr("longstring.length.toobig", b, *n, err)
 			return
 		}
-		val = string(b[n : n+length])
-		n += length
-
+		if val, err = pio.ReadString(b, n, int(length)); err != nil {
+			err = amfParseErr("longstring.body", b, *n, err)
+		}
 	default:
-		err = amf0ParseErr(fmt.Sprintf("invalidmarker=%d", marker), offset+n, err)
-		return
+		err = amfParseErr(fmt.Sprintf("invalidmarker=%d", marker), b, *n, err)
 	}
 
 	return

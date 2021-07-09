@@ -59,6 +59,19 @@ const (
 	FRAME_INTER = 2
 
 	VIDEO_H264 = 7
+	VIDEO_H265 = 12
+)
+
+/* Video codecs */
+const (
+	NGX_RTMP_VIDEO_JPEG          = 1
+	NGX_RTMP_VIDEO_SORENSON_H263 = 2
+	NGX_RTMP_VIDEO_SCREEN        = 3
+	NGX_RTMP_VIDEO_ON2_VP6       = 4
+	NGX_RTMP_VIDEO_ON2_VP6_ALPHA = 5
+	NGX_RTMP_VIDEO_SCREEN2       = 6
+	NGX_RTMP_VIDEO_H264          = 7
+	NGX_RTMP_VIDEO_H265          = 12
 )
 
 type Tag struct {
@@ -149,8 +162,8 @@ type Tag struct {
 	AVCPacketType uint8
 
 	CompositionTime int32
-
-	Data []byte
+	NoHead          bool
+	Data            []byte
 }
 
 func (self Tag) ChannelLayout() av.ChannelLayout {
@@ -163,7 +176,7 @@ func (self Tag) ChannelLayout() av.ChannelLayout {
 
 func (self *Tag) audioParseHeader(b []byte) (n int, err error) {
 	if len(b) < n+1 {
-		err = fmt.Errorf("audiodata: parse invalid")
+		err = fmt.Errorf("%s", "Flvio.Audio.Data.Parse.Invalid")
 		return
 	}
 
@@ -177,7 +190,7 @@ func (self *Tag) audioParseHeader(b []byte) (n int, err error) {
 	switch self.SoundFormat {
 	case SOUND_AAC:
 		if len(b) < n+1 {
-			err = fmt.Errorf("audiodata: parse invalid")
+			err = fmt.Errorf("%s", "Flvio.Audio.Data.Parse.Invalid")
 			return
 		}
 		self.AACPacketType = b[n]
@@ -207,7 +220,7 @@ func (self Tag) audioFillHeader(b []byte) (n int) {
 
 func (self *Tag) videoParseHeader(b []byte) (n int, err error) {
 	if len(b) < n+1 {
-		err = fmt.Errorf("videodata: parse invalid")
+		err = fmt.Errorf("%s", "Flvio.Video.Data.Parse.Invalid")
 		return
 	}
 	flags := b[n]
@@ -217,7 +230,7 @@ func (self *Tag) videoParseHeader(b []byte) (n int, err error) {
 
 	if self.FrameType == FRAME_INTER || self.FrameType == FRAME_KEY {
 		if len(b) < n+4 {
-			err = fmt.Errorf("videodata: parse invalid")
+			err = fmt.Errorf("%s", "Flvio.Video.Data.Parse.Invalid")
 			return
 		}
 		self.AVCPacketType = b[n]
@@ -285,7 +298,7 @@ func ParseTagHeader(b []byte) (tag Tag, ts int32, datalen int, err error) {
 		tag = Tag{Type: tagtype}
 
 	default:
-		err = fmt.Errorf("flvio: ReadTag tagtype=%d invalid", tagtype)
+		err = fmt.Errorf("Flvio.Read.Tag.TagType=%d.Invalid", tagtype)
 		return
 	}
 
@@ -346,10 +359,12 @@ func FillTagTrailer(b []byte, datalen int) (n int) {
 	return
 }
 
-func WriteTag(w io.Writer, tag Tag, ts int32, b []byte) (err error) {
+func WriteTag(w io.Writer, tag *Tag, ts int32, b []byte) (err error) {
 	data := tag.Data
-
-	n := tag.FillHeader(b[TagHeaderLength:])
+	n := 0
+	if tag.NoHead {
+		n = tag.FillHeader(b[TagHeaderLength:])
+	}
 	datalen := len(data) + n
 
 	n += FillTagHeader(b, tag.Type, datalen, ts)
@@ -395,7 +410,7 @@ func FillFileHeader(b []byte, flags uint8) (n int) {
 func ParseFileHeader(b []byte) (flags uint8, skip int, err error) {
 	flv := pio.U24BE(b[0:3])
 	if flv != 0x464c56 { // 'FLV'
-		err = fmt.Errorf("flvio: file header cc3 invalid")
+		err = fmt.Errorf("%s", "Flvio.File.Header.FLV.Invalid")
 		return
 	}
 
@@ -403,7 +418,7 @@ func ParseFileHeader(b []byte) (flags uint8, skip int, err error) {
 
 	skip = int(pio.U32BE(b[5:9])) - 9 + 4
 	if skip < 0 {
-		err = fmt.Errorf("flvio: file header datasize invalid")
+		err = fmt.Errorf("%s", "Flvio.File.Header.DataSize.Invalid")
 		return
 	}
 
